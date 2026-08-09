@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from meta_pcvr_downloader.api import Build, parse_app_id, select_build
-from meta_pcvr_downloader.download import DownloadError, Downloader, _safe_destination
+from meta_pcvr_downloader.download import Downloader, DownloadError, _safe_destination
 
 
 class ApiTests(unittest.TestCase):
     def test_parse_numeric_and_store_url(self):
         self.assertEqual(parse_app_id("2031736060288351"), "2031736060288351")
         self.assertEqual(
-            parse_app_id("https://www.meta.com/experiences/pcvr/title/2031736060288351/"),
+            parse_app_id(
+                "https://www.meta.com/experiences/pcvr/title/2031736060288351/"
+            ),
             "2031736060288351",
         )
 
@@ -29,9 +31,11 @@ class ApiTests(unittest.TestCase):
 
 class DownloadTests(unittest.TestCase):
     def test_manifest_path_traversal_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(DownloadError):
-                _safe_destination(Path(directory), "../escape.exe")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaises(DownloadError),
+        ):
+            _safe_destination(Path(directory), "../escape.exe")
 
     def test_duplicate_segment_is_assembled_into_multiple_files(self):
         clear = b"shared segment"
@@ -40,8 +44,16 @@ class DownloadTests(unittest.TestCase):
         manifest = {
             "launchFile": "one.bin",
             "files": {
-                "one.bin": {"size": len(clear), "sha256": file_hash, "segments": [[0, segment_hash]]},
-                "sub/two.bin": {"size": len(clear), "sha256": file_hash, "segments": [[0, segment_hash]]},
+                "one.bin": {
+                    "size": len(clear),
+                    "sha256": file_hash,
+                    "segments": [[0, segment_hash]],
+                },
+                "sub/two.bin": {
+                    "size": len(clear),
+                    "sha256": file_hash,
+                    "segments": [[0, segment_hash]],
+                },
             },
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -54,7 +66,10 @@ class DownloadTests(unittest.TestCase):
             Downloader("token", build, output, cache, jobs=1).run(manifest)
             self.assertEqual((output / "one.bin").read_bytes(), clear)
             self.assertEqual((output / "sub/two.bin").read_bytes(), clear)
-            self.assertEqual(json.loads((output / "manifest.json").read_text())["launchFile"], "one.bin")
+            self.assertEqual(
+                json.loads((output / "manifest.json").read_text())["launchFile"],
+                "one.bin",
+            )
 
 
 if __name__ == "__main__":

@@ -13,10 +13,11 @@ described by Meta's signed-in build manifest. Interrupted runs can reuse the cac
 
 ## Fastest setup
 
-Requirements: Linux, Python 3.10+, and Edge, Chrome, or Chromium.
+Requirements: Linux, Python 3.10+, and Firefox, Edge, Chrome, or Chromium.
 
 1. Sign in to [meta.com](https://www.meta.com/) in your browser.
-2. Install `secret-tool` if it is not already present:
+2. Chromium-family browsers only: install `secret-tool` if it is not already present.
+   Firefox does not need it.
 
    - Fedora/Bazzite: `sudo dnf install libsecret`
    - Ubuntu/Debian: `sudo apt install libsecret-tools`
@@ -64,10 +65,11 @@ Run `meta-pcvr download --help` for cache, concurrency, and non-interactive opti
 
 ## Authentication
 
-By default the tool searches normal and Flatpak profiles for Microsoft Edge, Google
-Chrome, and Chromium. It reads the `oc_ac_at` Meta login cookie locally and decrypts it
-through your desktop Secret Service. The token is kept in memory and is never printed,
-logged, or saved by this tool.
+By default the tool searches native, Flatpak, and Snap profiles for Firefox, plus normal
+and Flatpak profiles for Microsoft Edge, Google Chrome, and Chromium. It reads the
+`oc_ac_at` Meta login cookie locally. Firefox stores this cookie directly in its profile;
+Chromium-family browsers are decrypted through your desktop Secret Service. The token is
+kept in memory and is never printed, logged, or saved by this tool.
 
 For unsupported browsers, provide your own short-lived token through the environment:
 

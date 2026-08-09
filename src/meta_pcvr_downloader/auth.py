@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -15,7 +15,7 @@ class AuthenticationError(RuntimeError):
     pass
 
 
-def _cookie_candidates(home: Path) -> list[Path]:
+def _chromium_cookie_candidates(home: Path) -> list[tuple[str, Path]]:
     roots = [
         home / ".config/microsoft-edge",
         home / ".config/microsoft-edge-beta",
@@ -25,7 +25,7 @@ def _cookie_candidates(home: Path) -> list[Path]:
         home / ".var/app/com.google.Chrome/config/google-chrome",
         home / ".var/app/org.chromium.Chromium/config/chromium",
     ]
-    results: list[Path] = []
+    results: list[tuple[str, Path]] = []
     for root in roots:
         if not root.is_dir():
             continue
@@ -33,8 +33,28 @@ def _cookie_candidates(home: Path) -> list[Path]:
             for relative in ("Network/Cookies", "Cookies"):
                 candidate = profile / relative
                 if candidate.is_file():
-                    results.append(candidate)
+                    results.append(("chromium", candidate))
     return results
+
+
+def _firefox_cookie_candidates(home: Path) -> list[tuple[str, Path]]:
+    roots = [
+        home / ".mozilla/firefox",
+        home / ".var/app/org.mozilla.firefox/.mozilla/firefox",
+        home / "snap/firefox/common/.mozilla/firefox",
+    ]
+    results: list[tuple[str, Path]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for candidate in sorted(root.glob("*/cookies.sqlite")):
+            if candidate.is_file():
+                results.append(("firefox", candidate))
+    return results
+
+
+def _cookie_candidates(home: Path) -> list[tuple[str, Path]]:
+    return _firefox_cookie_candidates(home) + _chromium_cookie_candidates(home)
 
 
 def _keyring_password() -> bytes:
@@ -64,7 +84,9 @@ def _decrypt_chromium_cookie(host: str, encrypted: bytes, password: bytes) -> st
         try:
             return encrypted.decode()
         except UnicodeDecodeError as error:
-            raise AuthenticationError("Unsupported browser cookie encryption format") from error
+            raise AuthenticationError(
+                "Unsupported browser cookie encryption format"
+            ) from error
     key = hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", 1, 16)
     ciphertext = encrypted[3:]
     decryptor = Cipher(algorithms.AES(key), modes.CBC(b" " * 16)).decryptor()
@@ -74,18 +96,29 @@ def _decrypt_chromium_cookie(host: str, encrypted: bytes, password: bytes) -> st
         raise AuthenticationError("Could not decrypt the browser login cookie")
     clear = clear[:-padding]
     domain_digest = hashlib.sha256(host.encode()).digest()
-    if clear.startswith(domain_digest):
-        clear = clear[len(domain_digest) :]
+    clear = clear.removeprefix(domain_digest)
     try:
         return clear.decode()
     except UnicodeDecodeError as error:
-        raise AuthenticationError("Could not decode the browser login cookie") from error
+        raise AuthenticationError(
+            "Could not decode the browser login cookie"
+        ) from error
 
 
-def _read_cookie(database: Path) -> tuple[str, str | bytes]:
+def _snapshot_database(database: Path, destination: Path) -> None:
+    source = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    target = sqlite3.connect(destination)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+
+
+def _read_chromium_cookie(database: Path) -> tuple[str, str | bytes]:
     with tempfile.TemporaryDirectory(prefix="meta-pcvr-auth-") as temporary:
         copied = Path(temporary) / "Cookies"
-        shutil.copy2(database, copied)
+        _snapshot_database(database, copied)
         connection = sqlite3.connect(copied)
         try:
             row = connection.execute(
@@ -102,6 +135,24 @@ def _read_cookie(database: Path) -> tuple[str, str | bytes]:
     return host, value or bytes(encrypted)
 
 
+def _read_firefox_cookie(database: Path) -> str:
+    with tempfile.TemporaryDirectory(prefix="meta-pcvr-auth-") as temporary:
+        copied = Path(temporary) / "cookies.sqlite"
+        _snapshot_database(database, copied)
+        connection = sqlite3.connect(copied)
+        try:
+            row = connection.execute(
+                "select value from moz_cookies where name='oc_ac_at' and "
+                "(host like '%oculus.com' or host like '%meta.com') "
+                "order by expiry desc limit 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    if row is None or not row[0]:
+        raise AuthenticationError(f"No Meta login cookie in {database}")
+    return str(row[0])
+
+
 def get_access_token(home: Path | None = None) -> str:
     token = os.environ.get("META_OCULUS_ACCESS_TOKEN", "").strip()
     if token:
@@ -110,9 +161,12 @@ def get_access_token(home: Path | None = None) -> str:
     failures: list[str] = []
     password: bytes | None = None
     candidates = _cookie_candidates(home or Path.home())
-    for database in sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True):
+    candidates.sort(key=lambda item: item[1].stat().st_mtime, reverse=True)
+    for browser, database in candidates:
         try:
-            host, value = _read_cookie(database)
+            if browser == "firefox":
+                return _read_firefox_cookie(database)
+            host, value = _read_chromium_cookie(database)
             if isinstance(value, str):
                 return value
             if password is None:
@@ -123,6 +177,6 @@ def get_access_token(home: Path | None = None) -> str:
 
     detail = f" Last error: {failures[-1]}" if failures else ""
     raise AuthenticationError(
-        "No usable Meta login was found. Sign in at meta.com in Edge, Chrome, "
-        "or Chromium and retry, or set META_OCULUS_ACCESS_TOKEN." + detail
+        "No usable Meta login was found. Sign in at meta.com in Firefox, Edge, "
+        "Chrome, or Chromium and retry, or set META_OCULUS_ACCESS_TOKEN." + detail
     )
