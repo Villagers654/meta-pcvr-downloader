@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import time
+from dataclasses import dataclass
 
-
-USER_AGENT = "meta-pcvr-downloader/0.1"
+USER_AGENT = "meta-pcvr-downloader/0.1.1"
 GRAPHQL_URL = "https://graph.oculus.com/graphql"
 VERSIONS_DOCUMENT_ID = "1586217024733717"
 
@@ -35,7 +34,9 @@ def parse_app_id(value: str) -> str:
     match = re.search(r"(?:^|/)(\d{8,})(?:/|$|[?#])", value)
     if match:
         return match.group(1)
-    raise ValueError("Expected a numeric Meta app ID or a Meta store URL containing one")
+    raise ValueError(
+        "Expected a numeric Meta app ID or a Meta store URL containing one"
+    )
 
 
 def _post_graphql(token: str, document_id: str, variables: dict[str, object]) -> dict:
@@ -49,7 +50,10 @@ def _post_graphql(token: str, document_id: str, variables: dict[str, object]) ->
     request = urllib.request.Request(
         GRAPHQL_URL,
         data=body,
-        headers={"User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
     )
     last_error: Exception | None = None
     for attempt in range(3):
@@ -61,7 +65,9 @@ def _post_graphql(token: str, document_id: str, variables: dict[str, object]) ->
             last_error = error
             if error.code not in {429, 500, 502, 503, 504} or attempt == 2:
                 message = error.read().decode(errors="replace")[:500]
-                raise MetaApiError(f"Meta API returned HTTP {error.code}: {message}") from error
+                raise MetaApiError(
+                    f"Meta API returned HTTP {error.code}: {message}"
+                ) from error
         except (urllib.error.URLError, TimeoutError) as error:
             last_error = error
             if attempt == 2:
@@ -70,7 +76,9 @@ def _post_graphql(token: str, document_id: str, variables: dict[str, object]) ->
     else:
         raise MetaApiError(f"Could not reach the Meta API: {last_error}")
     if payload.get("errors"):
-        raise MetaApiError(f"Meta API error: {payload['errors'][0].get('message', payload['errors'][0])}")
+        raise MetaApiError(
+            f"Meta API error: {payload['errors'][0].get('message', payload['errors'][0])}"
+        )
     return payload
 
 
@@ -81,7 +89,9 @@ def list_builds(token: str, app_id: str) -> list[Build]:
         name = node.get("displayName") or node.get("display_name") or app_id
         edges = node["supportedBinaries"]["edges"]
     except (KeyError, TypeError) as error:
-        raise MetaApiError("Meta returned no PCVR application data for that app ID") from error
+        raise MetaApiError(
+            "Meta returned no PCVR application data for that app ID"
+        ) from error
     builds = []
     for edge in edges:
         binary = edge.get("node") or {}
