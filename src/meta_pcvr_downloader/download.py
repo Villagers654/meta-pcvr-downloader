@@ -27,6 +27,7 @@ class _Cancelled(Exception):
 
 
 SEGMENT_ATTEMPTS = 5
+PROGRESS_INTERVAL = 0.5
 
 
 def _sha256_file(path: Path) -> str:
@@ -223,8 +224,23 @@ class Downloader:
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
 
-        print(f"Assembling and validating {len(files)} files...")
+        print(f"Assembling and validating {len(files)} files...", flush=True)
         completed_bytes = 0
+        # Games range from thousands of small files to a few 10+ GiB archives,
+        # so report on a clock rather than every Nth file.
+        last_report = time.monotonic()
+
+        def report(done_files: int, done_bytes: int, *, final: bool = False) -> None:
+            nonlocal last_report
+            now = time.monotonic()
+            if final or now - last_report >= PROGRESS_INTERVAL:
+                last_report = now
+                print(
+                    f"  files {done_files}/{len(files)} "
+                    f"({done_bytes / 2**30:.2f}/{total_size / 2**30:.2f} GiB)",
+                    flush=True,
+                )
+
         for index, (relative_name, item) in enumerate(files.items(), 1):
             destination = _safe_destination(self.output, relative_name)
             expected_size = int(item["size"])
@@ -234,37 +250,35 @@ class Downloader:
                 and destination.stat().st_size == expected_size
                 and _sha256_file(destination) == expected_hash
             ):
-                completed_bytes += expected_size
-                continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            partial = destination.with_name(destination.name + f".{os.getpid()}.part")
-            digest = hashlib.sha256()
-            size = 0
-            try:
-                with partial.open("wb") as output:
-                    for segment in item["segments"]:
-                        with (self.cache / str(segment[1])).open("rb") as source:
-                            for chunk in iter(
-                                lambda: source.read(4 * 1024 * 1024), b""
-                            ):
-                                output.write(chunk)
-                                digest.update(chunk)
-                                size += len(chunk)
-                if size != expected_size or digest.hexdigest() != expected_hash:
-                    raise DownloadError(
-                        f"Validation failed while assembling {relative_name}"
-                    )
-                os.replace(partial, destination)
-            except Exception:
-                partial.unlink(missing_ok=True)
-                raise
-            completed_bytes += size
-            if index % 100 == 0 or index == len(files):
-                print(
-                    f"  files {index}/{len(files)} "
-                    f"({completed_bytes / 2**30:.2f}/{total_size / 2**30:.2f} GiB)",
-                    flush=True,
+                size = expected_size
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                partial = destination.with_name(
+                    destination.name + f".{os.getpid()}.part"
                 )
+                digest = hashlib.sha256()
+                size = 0
+                try:
+                    with partial.open("wb") as output:
+                        for segment in item["segments"]:
+                            with (self.cache / str(segment[1])).open("rb") as source:
+                                for chunk in iter(
+                                    lambda: source.read(4 * 1024 * 1024), b""
+                                ):
+                                    output.write(chunk)
+                                    digest.update(chunk)
+                                    size += len(chunk)
+                                    report(index - 1, completed_bytes + size)
+                    if size != expected_size or digest.hexdigest() != expected_hash:
+                        raise DownloadError(
+                            f"Validation failed while assembling {relative_name}"
+                        )
+                    os.replace(partial, destination)
+                except Exception:
+                    partial.unlink(missing_ok=True)
+                    raise
+            completed_bytes += size
+            report(index, completed_bytes, final=index == len(files))
 
         manifest_path = self.output / "manifest.json"
         temporary = manifest_path.with_suffix(".json.part")

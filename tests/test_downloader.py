@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import contextlib
 import io
 import tempfile
 import threading
@@ -109,8 +110,9 @@ class SegmentFailureTests(unittest.TestCase):
                 raise ConnectionResetError("connection reset by peer")
             return _Response(zlib.compress(clear))
 
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            download.urllib.request, "urlopen", urlopen
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(download.urllib.request, "urlopen", urlopen),
         ):
             root = Path(directory)
             build = Build("1", "Test", "2", "1.0", 1)
@@ -130,8 +132,9 @@ class SegmentFailureTests(unittest.TestCase):
                 requested.append(request.full_url)
             raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
 
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            download.urllib.request, "urlopen", urlopen
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(download.urllib.request, "urlopen", urlopen),
         ):
             root = Path(directory)
             build = Build("1", "Test", "2", "1.0", 1)
@@ -141,6 +144,53 @@ class SegmentFailureTests(unittest.TestCase):
                 )
         # Only segments already in flight may start; the rest are cancelled.
         self.assertLess(len(requested), 20)
+
+
+class AssemblyProgressTests(unittest.TestCase):
+    def _run(self, root, manifest):
+        output = io.StringIO()
+        build = Build("1", "Test", "2", "1.0", 1)
+        with (
+            mock.patch.object(download, "PROGRESS_INTERVAL", 0),
+            contextlib.redirect_stdout(output),
+        ):
+            Downloader("token", build, root / "game", root / "cache", jobs=1).run(
+                manifest
+            )
+        return [line.strip() for line in output.getvalue().splitlines()]
+
+    def test_large_file_reports_progress_while_it_is_written(self):
+        parts = [b"a" * 10, b"b" * 10, b"c" * 10]
+        hashes = [hashlib.sha256(part).hexdigest() for part in parts]
+        whole = b"".join(parts)
+        manifest = {
+            "files": {
+                "big.pak": {
+                    "size": len(whole),
+                    "sha256": hashlib.sha256(whole).hexdigest(),
+                    "segments": [
+                        [index * 10, value] for index, value in enumerate(hashes)
+                    ],
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cache").mkdir()
+            for part, value in zip(parts, hashes):
+                (root / "cache" / value).write_bytes(part)
+
+            lines = self._run(root, manifest)
+            files = [line for line in lines if line.startswith("files ")]
+            # Mid-file reports keep 0 files done; the last one counts the file.
+            self.assertTrue(files[0].startswith("files 0/1"))
+            self.assertTrue(files[-1].startswith("files 1/1"))
+            self.assertIn("Assembling and validating 1 files...", lines)
+
+            # A resumed download with every file already valid still finishes
+            # with a final progress line.
+            resumed = self._run(root, manifest)
+            self.assertTrue(resumed[-1].startswith("files 1/1"))
 
 
 if __name__ == "__main__":
