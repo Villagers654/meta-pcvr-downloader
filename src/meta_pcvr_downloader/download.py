@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import http.client
 import json
 import os
 import shutil
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -18,6 +20,13 @@ from .api import USER_AGENT, Build
 
 class DownloadError(RuntimeError):
     pass
+
+
+class _Cancelled(Exception):
+    """Another segment already failed, so this one stops early."""
+
+
+SEGMENT_ATTEMPTS = 5
 
 
 def _sha256_file(path: Path) -> str:
@@ -97,6 +106,7 @@ class Downloader:
         self.output = output.expanduser()
         self.cache = cache.expanduser()
         self.jobs = jobs
+        self._stop = threading.Event()
 
     def _download_segment(self, segment_hash: str) -> tuple[str, int, bool]:
         destination = self.cache / segment_hash
@@ -119,7 +129,7 @@ class Downloader:
         digest = hashlib.sha256()
         size = 0
         inflater = zlib.decompressobj()
-        for attempt in range(3):
+        for attempt in range(SEGMENT_ATTEMPTS):
             digest = hashlib.sha256()
             size = 0
             inflater = zlib.decompressobj()
@@ -130,6 +140,8 @@ class Downloader:
                     partial.open("wb") as output,
                 ):
                     while compressed := response.read(1024 * 1024):
+                        if self._stop.is_set():
+                            raise _Cancelled
                         clear = inflater.decompress(compressed)
                         output.write(clear)
                         digest.update(clear)
@@ -141,17 +153,27 @@ class Downloader:
                 break
             except urllib.error.HTTPError as error:
                 partial.unlink(missing_ok=True)
-                if error.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                if (
+                    error.code not in {429, 500, 502, 503, 504}
+                    or attempt == SEGMENT_ATTEMPTS - 1
+                ):
                     raise DownloadError(
                         f"Segment {segment_hash} returned HTTP {error.code}"
                     ) from error
-            except (urllib.error.URLError, TimeoutError, zlib.error) as error:
+            except _Cancelled:
                 partial.unlink(missing_ok=True)
-                if attempt == 2:
+                raise
+            # A connection dropped mid-transfer surfaces as ConnectionResetError,
+            # IncompleteRead or an SSL error, not only URLError; all are retryable.
+            except (OSError, http.client.HTTPException, zlib.error) as error:
+                partial.unlink(missing_ok=True)
+                if attempt == SEGMENT_ATTEMPTS - 1:
                     raise DownloadError(
-                        f"Could not download segment {segment_hash}: {error}"
+                        f"Could not download segment {segment_hash}: "
+                        f"{type(error).__name__}: {error}"
                     ) from error
-            time.sleep(2**attempt)
+            if self._stop.wait(min(2**attempt, 30)):
+                raise _Cancelled
         if digest.hexdigest() != segment_hash:
             partial.unlink(missing_ok=True)
             raise DownloadError(f"Hash mismatch for segment {segment_hash}")
@@ -177,7 +199,9 @@ class Downloader:
             f"Preparing {len(segment_hashes)} unique segments with {self.jobs} workers..."
         )
         finished = cached = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.jobs) as executor:
+        self._stop.clear()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.jobs)
+        try:
             futures = [
                 executor.submit(self._download_segment, value)
                 for value in segment_hashes
@@ -191,6 +215,13 @@ class Downloader:
                         f"  segments {finished}/{len(futures)} ({cached} cached)",
                         flush=True,
                     )
+        except BaseException:
+            # One failed segment fails the download. Stop the others now
+            # instead of fetching every remaining segment before reporting it.
+            self._stop.set()
+            raise
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
 
         print(f"Assembling and validating {len(files)} files...")
         completed_bytes = 0
